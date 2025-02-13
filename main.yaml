@@ -1,0 +1,91 @@
+trigger:
+  branches:
+    include:
+      - main
+
+variables:
+  terraformVersion: '1.5.0'
+  helmVersion: '3.12.0'
+  acrName: 'myacr'
+  resourceGroup: 'my-resource-group'
+  k8sClusterName: 'my-aks-cluster'
+  imageRepository: 'my-app'
+  imageTag: '$(Build.BuildId)'
+
+stages:
+  - stage: Provision_Infrastructure
+    displayName: 'Provision Infrastructure with Terraform'
+    jobs:
+      - job: Terraform_Apply
+        displayName: 'Terraform Apply'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.x'
+              addToPath: true
+
+          - script: |
+              echo "Installing Terraform"
+              wget https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip
+              unzip terraform_$(terraformVersion)_linux_amd64.zip
+              sudo mv terraform /usr/local/bin/
+              terraform --version
+            displayName: 'Install Terraform'
+
+          - script: |
+              echo "Initializing Terraform"
+              cd infrastructure
+              terraform init
+              terraform validate
+              terraform apply -auto-approve
+            displayName: 'Run Terraform Apply'
+
+  - stage: Build_and_Publish_Image
+    displayName: 'Build and Publish Docker Image to ACR'
+    dependsOn: Provision_Infrastructure
+    jobs:
+      - job: Build_Publish_Image
+        displayName: 'Build and Publish Image'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - task: Docker@2
+            inputs:
+              containerRegistry: '$(acrName)'
+              repository: '$(imageRepository)'
+              command: 'buildAndPush'
+              Dockerfile: '**/Dockerfile'
+              tags: '$(imageTag)'
+
+  - stage: Deploy_to_Kubernetes
+    displayName: 'Deploy to Kubernetes using Helm'
+    dependsOn: Build_and_Publish_Image
+    jobs:
+      - job: Helm_Deploy
+        displayName: 'Helm Deploy'
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              echo "Installing Helm"
+              curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+              helm version
+            displayName: 'Install Helm'
+
+          - task: AzureCLI@2
+            inputs:
+              azureSubscription: 'my-azure-subscription'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                echo "Getting AKS credentials"
+                az aks get-credentials --resource-group $(resourceGroup) --name $(k8sClusterName)
+
+                echo "Deploying with Helm"
+                cd helm
+                helm upgrade --install my-app ./my-app-chart \
+                  --set image.repository="$(acrName).azurecr.io/$(imageRepository)" \
+                  --set image.tag="$(imageTag)"
+            displayName: 'Deploy to AKS with Helm'
